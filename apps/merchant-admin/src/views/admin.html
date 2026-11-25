@@ -1464,6 +1464,7 @@
               <thead>
                 <tr>
                   <th>Order ID</th>
+                  <th>Product &amp; Customer</th>
                   <th>Payment ID</th>
                   <th>Amount</th>
                   <th>Method</th>
@@ -1476,7 +1477,7 @@
               </thead>
               <tbody id="paymentsLedgerTbody">
                 <tr>
-                  <td colspan="9" style="text-align:center; padding:1.5rem;">Loading transactions...</td>
+                  <td colspan="10" style="text-align:center; padding:1.5rem;">Loading transactions...</td>
                 </tr>
               </tbody>
             </table>
@@ -4929,9 +4930,23 @@
             ? p.verificationSources.map(s => `<code style="font-size:0.7rem; background:var(--bg-box); padding:0.15rem 0.35rem; border-radius:0.25rem; margin-right:0.2rem; border:1px solid var(--border); color:var(--info);">${s === 'GOOGLE_MESSAGES' ? 'SMS' : escapeHtmlValue(s)}</code>`).join('')
             : '<span style="color:var(--text-muted); font-size:0.75rem;">-</span>';
 
+          const meta = (p.metadata && typeof p.metadata === 'object') ? p.metadata : {};
+          const itemsList = Array.isArray(meta.items) ? meta.items : [];
+          const itemsHtml = itemsList.length > 0
+            ? itemsList.map(it => `<div style="font-weight:600; font-size:0.78rem; color:var(--text-heading);">${escapeHtmlValue((it.brand ? it.brand + ' ' : '') + (it.name || 'Watch'))} <span style="color:var(--text-muted); font-weight:500;">×${escapeHtmlValue(it.qty || it.quantity || 1)}</span></div>`).join('')
+            : '<div style="font-size:0.75rem; color:var(--text-muted);">-</div>';
+          const boxTag = meta.includeOgRolexBox ? '<div style="font-size:0.7rem; color:#047857; font-weight:600;">+ OG Rolex Box</div>' : '';
+          const codTag = meta.paymentMode === 'COD_ADVANCE'
+            ? `<div style="font-size:0.7rem; color:#b45309; font-weight:600;">COD Advance • Balance ₹${escapeHtmlValue(meta.codBalanceDue ?? 0)}</div>`
+            : '';
+          const custLine = [meta.customerName, meta.customerPhone].filter(Boolean).map(escapeHtmlValue).join(' • ');
+          const addrLine = meta.shippingAddress ? `<div style="font-size:0.7rem; color:var(--text-muted); max-width:220px; white-space:normal;">${escapeHtmlValue(meta.shippingAddress)}</div>` : '';
+          const detailsCell = `${itemsHtml}${boxTag}${codTag}${custLine ? `<div style="font-size:0.72rem; color:var(--text-muted); margin-top:2px;">${custLine}</div>` : ''}${addrLine}`;
+
           return `
           <tr>
             <td><strong>Order #${escapeHtml(p.orderId)}</strong></td>
+            <td style="min-width:190px;">${detailsCell}</td>
             <td><code>${p.id}</code></td>
             <td>₹${(Number(p.amountPaise) / 100).toFixed(2)}</td>
             <td>${escapeHtmlValue(p.method)}</td>

@@ -244,6 +244,7 @@ export function registerAdminRoutes(server, ctx) {
         verificationLevel: p.verificationLevel || 0,
         verificationSources: p.verificationSources || [],
         verificationTag: p.verificationTag || 'UNVERIFIED',
+        metadata: p.metadata || {},
         createdAt: p.createdAt,
         completedAt: p.completedAt
       }))
