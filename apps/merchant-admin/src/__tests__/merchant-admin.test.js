@@ -59,7 +59,7 @@ describe('Merchant Admin Integration Tests', () => {
     assert.ok(res.text.includes('Accepts payments above ₹2,000'));
   });
 
-  test('GET /api/admin/tickets requires the admin token', async () => {
+  test('GET /api/admin/tickets requires the admin token or encrypted password session cookie', async () => {
     const anonymous = await get('/api/admin/tickets');
     assert.equal(anonymous.status, 401);
 
@@ -67,6 +67,28 @@ describe('Merchant Admin Integration Tests', () => {
     assert.equal(res.status, 200);
     const json = JSON.parse(res.text);
     assert.ok(Array.isArray(json));
+
+    // Verify encrypted password login issues HttpOnly session cookie that authorizes /api/admin/tickets
+    const loginRes = await new Promise((resolve, reject) => {
+      const body = JSON.stringify({ username: 'dappersfit', password: process.env.ADMIN_PASSWORD || 'Dappersfit@2026!' });
+      const req = http.request(`${baseUrl}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) }
+      }, r => {
+        let data = '';
+        r.on('data', c => { data += c; });
+        r.on('end', () => resolve({ status: r.statusCode, headers: r.headers, text: data }));
+      });
+      req.on('error', reject);
+      req.write(body);
+      req.end();
+    });
+    assert.equal(loginRes.status, 200);
+    const setCookie = (loginRes.headers['set-cookie'] || [])[0] || '';
+    assert.ok(setCookie.includes('youpi_admin_session=') && setCookie.includes('HttpOnly'));
+    const cookiePair = setCookie.split(';')[0];
+    const authedTickets = await get('/api/admin/tickets', { Cookie: cookiePair });
+    assert.equal(authedTickets.status, 200);
   });
 
   test('Control Center supervisor proxy routes (/api/services* and /api/logs/stream) require the admin token', async () => {

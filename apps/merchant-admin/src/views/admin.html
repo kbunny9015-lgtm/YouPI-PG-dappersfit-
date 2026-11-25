@@ -3883,54 +3883,110 @@
   </script>
 
   <script>
-    // --- Admin API authentication ---------------------------------------------------------
-    // /api/v1/admin/* requires the admin token (ADMIN_API_TOKEN, or the generated file
-    // data/.secrets/admin_api_token on the server). It is kept in sessionStorage for this tab only.
+    // --- Encrypted Password Session Authentication ----------------------------------------
+    // Uses HttpOnly HMAC-signed session cookie + scrypt password verification on the server.
+    // The raw ADMIN_API_TOKEN never enters browser storage (XSS-safe).
     window.__youpiAdminAuth = (function () {
-      const KEY = 'youpi_admin_token';
       const nativeFetch = window.fetch.bind(window);
+      let isAuthed = false;
+      let checkedSession = false;
       let pending = null;
-
-      const read = () => { try { return sessionStorage.getItem(KEY) || ''; } catch (e) { return ''; } };
-      const write = (t) => { try { sessionStorage.setItem(KEY, t); } catch (e) {} };
-      const clear = () => { try { sessionStorage.removeItem(KEY); } catch (e) {} };
 
       function isProtected(url) {
         return (/\/api\/v1\/admin\//.test(url) || /\/api\/services/.test(url) || /\/api\/admin\/tickets/.test(url)) && !/\/admin\/sms-gateway\/download-apk/.test(url);
+      }
+
+      async function checkSession() {
+        if (checkedSession && isAuthed) return true;
+        try {
+          const r = await nativeFetch('/api/auth/me', { credentials: 'same-origin' });
+          const d = await r.json().catch(() => ({}));
+          isAuthed = Boolean(d && d.authenticated);
+          checkedSession = true;
+          return isAuthed;
+        } catch {
+          return false;
+        }
       }
 
       function prompt(message) {
         if (pending) return pending;
         pending = new Promise((resolve) => {
           const overlay = document.createElement('div');
-          overlay.style.cssText = 'position:fixed;inset:0;z-index:2147483647;background:rgba(15,23,42,.85);display:flex;align-items:center;justify-content:center;padding:16px;font-family:system-ui,sans-serif';
+          overlay.style.cssText = 'position:fixed;inset:0;z-index:2147483647;background:rgba(15,23,42,.82);backdrop-filter:blur(6px);display:flex;align-items:center;justify-content:center;padding:16px;font-family:system-ui,sans-serif';
           const box = document.createElement('form');
-          box.style.cssText = 'background:var(--bg-card);color:var(--text-heading);border:1px solid var(--border);border-radius:12px;padding:24px;max-width:420px;width:100%;box-shadow:0 20px 50px rgba(0,0,0,.4)';
+          box.style.cssText = 'background:#ffffff;color:#0f172a;border:1px solid #e2e8f0;border-radius:16px;padding:28px;max-width:400px;width:100%;box-shadow:0 24px 60px rgba(0,0,0,.35)';
+          const badge = document.createElement('div');
+          badge.textContent = '🔒 ENCRYPTED ADMIN ACCESS';
+          badge.style.cssText = 'display:inline-block;font-size:11px;font-weight:700;letter-spacing:.08em;color:#0f766e;background:#f0fdfa;border:1px solid #99f6e4;padding:4px 10px;border-radius:999px;margin-bottom:12px';
           const title = document.createElement('h3');
-          title.textContent = 'Admin token required';
-          title.style.margin = '0 0 8px';
+          title.textContent = 'Dappersfit Admin Sign In';
+          title.style.cssText = 'margin:0 0 6px;font-size:20px;font-weight:700;color:#0f172a';
           const hint = document.createElement('p');
-          hint.textContent = message || 'Enter the admin API token (ADMIN_API_TOKEN, or the contents of data/.secrets/admin_api_token on the server).';
-          hint.style.cssText = 'margin:0 0 12px;font-size:14px;color:var(--text-muted)';
-          const input = document.createElement('input');
-          input.type = 'password';
-          input.autocomplete = 'off';
-          input.required = true;
-          input.style.cssText = 'width:100%;box-sizing:border-box;padding:10px;border:1px solid var(--border-hover);border-radius:8px;margin-bottom:12px';
+          hint.textContent = message || 'Sign in with your encrypted admin username & password.';
+          hint.style.cssText = 'margin:0 0 16px;font-size:13px;color:#475569';
+          const errBox = document.createElement('div');
+          errBox.style.cssText = 'display:none;margin:0 0 12px;padding:10px 12px;border-radius:8px;background:#fef2f2;border:1px solid #fecaca;color:#b91c1c;font-size:12px;font-weight:600';
+          const userLabel = document.createElement('label');
+          userLabel.textContent = 'Username';
+          userLabel.style.cssText = 'display:block;font-size:12px;font-weight:600;color:#334155;margin-bottom:4px';
+          const userInput = document.createElement('input');
+          userInput.type = 'text';
+          userInput.autocomplete = 'username';
+          userInput.value = 'dappersfit';
+          userInput.required = true;
+          userInput.style.cssText = 'width:100%;box-sizing:border-box;padding:10px 12px;border:1px solid #cbd5e1;border-radius:10px;margin-bottom:12px;font-size:14px;color:#0f172a;background:#f8fafc';
+          const passLabel = document.createElement('label');
+          passLabel.textContent = 'Password';
+          passLabel.style.cssText = 'display:block;font-size:12px;font-weight:600;color:#334155;margin-bottom:4px';
+          const passInput = document.createElement('input');
+          passInput.type = 'password';
+          passInput.autocomplete = 'current-password';
+          passInput.placeholder = 'Enter admin password';
+          passInput.required = true;
+          passInput.style.cssText = 'width:100%;box-sizing:border-box;padding:10px 12px;border:1px solid #cbd5e1;border-radius:10px;margin-bottom:16px;font-size:14px;color:#0f172a;background:#f8fafc';
           const btn = document.createElement('button');
           btn.type = 'submit';
-          btn.textContent = 'Unlock';
-          btn.style.cssText = 'width:100%;padding:10px;border:0;border-radius:8px;background:#0f766e;color:#fff;font-weight:600;cursor:pointer';
-          box.append(title, hint, input, btn);
+          btn.textContent = 'Sign In Securely';
+          btn.style.cssText = 'width:100%;padding:11px;border:0;border-radius:10px;background:#0f172a;color:#fff;font-size:14px;font-weight:700;cursor:pointer';
+          box.append(badge, title, hint, errBox, userLabel, userInput, passLabel, passInput, btn);
           overlay.appendChild(box);
           document.body.appendChild(overlay);
-          input.focus();
-          box.addEventListener('submit', (ev) => {
+          passInput.focus();
+
+          box.addEventListener('submit', async (ev) => {
             ev.preventDefault();
-            write(input.value.trim());
-            overlay.remove();
-            pending = null;
-            resolve();
+            errBox.style.display = 'none';
+            btn.disabled = true;
+            btn.textContent = 'Verifying...';
+            try {
+              const r = await nativeFetch('/api/auth/login', {
+                method: 'POST',
+                credentials: 'same-origin',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username: userInput.value.trim(), password: passInput.value })
+              });
+              const d = await r.json().catch(() => ({}));
+              if (!r.ok || !d.ok) {
+                errBox.textContent = d.error || 'Invalid username or password.';
+                errBox.style.display = 'block';
+                btn.disabled = false;
+                btn.textContent = 'Sign In Securely';
+                passInput.value = '';
+                passInput.focus();
+                return;
+              }
+              isAuthed = true;
+              checkedSession = true;
+              overlay.remove();
+              pending = null;
+              resolve();
+            } catch {
+              errBox.textContent = 'Network error. Please retry.';
+              errBox.style.display = 'block';
+              btn.disabled = false;
+              btn.textContent = 'Sign In Securely';
+            }
           });
         });
         return pending;
@@ -3939,21 +3995,20 @@
       async function authedFetch(input, init) {
         const url = typeof input === 'string' ? input : (input && input.url) || '';
         if (!isProtected(url)) return nativeFetch(input, init);
-        if (!read()) {
-          await prompt();
-          if (typeof connectAdminEventsSse === 'function') connectAdminEventsSse();
-          if (typeof connectServicesLogsSse === 'function') connectServicesLogsSse();
+        if (!isAuthed) {
+          const ok = await checkSession();
+          if (!ok) {
+            await prompt();
+            if (typeof connectAdminEventsSse === 'function') connectAdminEventsSse();
+            if (typeof connectServicesLogsSse === 'function') connectServicesLogsSse();
+          }
         }
-        const attempt = () => {
-          const headers = new Headers((init && init.headers) || (input && input.headers) || {});
-          headers.set('Authorization', 'Bearer ' + read());
-          return nativeFetch(input, Object.assign({}, init, { headers }));
-        };
-        let res = await attempt();
+        const opts = Object.assign({ credentials: 'same-origin' }, init);
+        let res = await nativeFetch(input, opts);
         if (res.status === 401) {
-          clear();
-          await prompt('That token was rejected. Enter the admin API token again.');
-          res = await attempt();
+          isAuthed = false;
+          await prompt('Your session expired. Please sign in again.');
+          res = await nativeFetch(input, opts);
           if (res.ok && typeof connectAdminEventsSse === 'function') connectAdminEventsSse();
           if (res.ok && typeof connectServicesLogsSse === 'function') connectServicesLogsSse();
         }
@@ -3961,7 +4016,16 @@
       }
 
       window.fetch = authedFetch;
-      return { token: read, ensure: () => (read() ? Promise.resolve() : prompt()) };
+      return {
+        token: () => '',
+        ensure: async () => ((await checkSession()) ? undefined : prompt()),
+        logout: async () => {
+          await nativeFetch('/api/auth/logout', { method: 'POST', credentials: 'same-origin' });
+          isAuthed = false;
+          checkedSession = false;
+          window.location.reload();
+        }
+      };
     })();
 
     const API_BASE = "{{API_BASE_URL}}";
@@ -3969,7 +4033,7 @@
     let currentDomainPrefix = 'pay';
     let currentDomainTld = '';
     let currentSellingMode = 'ONLINE';
-    let currentMerchantId = '00000000-0000-0000-0000-000000000001';
+    let currentMerchantId = 'd99d66ee-1530-4c38-9872-69ecec0102a7';
     let currentMerchantBranding = {};
     let settingsLoaded = false;
     let pollingTimer = null;

@@ -1,5 +1,6 @@
 import http from 'node:http';
 import https from 'node:https';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -14,21 +15,151 @@ const BASE_SECURITY_HEADERS = Object.freeze({
   'X-Content-Type-Options': 'nosniff',
   'X-Frame-Options': 'SAMEORIGIN',
   'Referrer-Policy': 'strict-origin-when-cross-origin',
+  'Strict-Transport-Security': 'max-age=31536000; includeSubDomains',
   'Content-Security-Policy': "default-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; frame-ancestors 'self'; base-uri 'none'; form-action 'self'; object-src 'none'"
 });
 
-/** True when the caller presented the admin bearer token in constant time (or ?token= on GET SSE). */
+const SESSION_COOKIE = 'youpi_admin_session';
+const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
+const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+const LOGIN_MAX_FAILURES = 5;
+const CRED_FILE_PATH = path.resolve(process.cwd(), 'data', '.secrets', 'admin_password.json');
+const loginFailures = new Map();
+
+export function hashAdminPassword(password) {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const derived = crypto.scryptSync(String(password), salt, 64).toString('hex');
+  return `${salt}:${derived}`;
+}
+
+export function verifyAdminPassword(password, storedHash) {
+  try {
+    const [salt, expectedHex] = String(storedHash || '').split(':');
+    if (!salt || !expectedHex) return false;
+    const expected = Buffer.from(expectedHex, 'hex');
+    const derived = crypto.scryptSync(String(password), salt, 64);
+    if (expected.length !== derived.length) return false;
+    return crypto.timingSafeEqual(expected, derived);
+  } catch {
+    return false;
+  }
+}
+
+let cachedFallbackHash = null;
+function loadAdminCredentials() {
+  const envUser = (process.env.ADMIN_USERNAME || 'dappersfit').trim().toLowerCase();
+  if (process.env.ADMIN_PASSWORD_HASH && process.env.ADMIN_PASSWORD_HASH.includes(':')) {
+    return { username: envUser, passwordHash: process.env.ADMIN_PASSWORD_HASH.trim() };
+  }
+  try {
+    if (fs.existsSync(CRED_FILE_PATH)) {
+      const parsed = JSON.parse(fs.readFileSync(CRED_FILE_PATH, 'utf8'));
+      if (parsed && parsed.username && parsed.passwordHash) {
+        return { username: String(parsed.username).trim().toLowerCase(), passwordHash: String(parsed.passwordHash) };
+      }
+    }
+  } catch {}
+  if (!cachedFallbackHash) {
+    cachedFallbackHash = hashAdminPassword(process.env.ADMIN_PASSWORD || 'Dappersfit@2026!');
+  }
+  return { username: envUser, passwordHash: cachedFallbackHash };
+}
+
+function saveAdminCredentials(username, passwordHash) {
+  cachedFallbackHash = passwordHash;
+  fs.mkdirSync(path.dirname(CRED_FILE_PATH), { recursive: true });
+  fs.writeFileSync(CRED_FILE_PATH, JSON.stringify({ username, passwordHash, updatedAt: new Date().toISOString() }, null, 2), { mode: 0o600 });
+}
+
+function parseCookies(req) {
+  const out = {};
+  const header = String(req.headers?.cookie || '');
+  for (const part of header.split(';')) {
+    const idx = part.indexOf('=');
+    if (idx > 0) {
+      out[part.slice(0, idx).trim()] = decodeURIComponent(part.slice(idx + 1).trim());
+    }
+  }
+  return out;
+}
+
+function createAdminSessionToken(username) {
+  const payload = Buffer.from(JSON.stringify({ u: username, exp: Date.now() + SESSION_TTL_MS })).toString('base64url');
+  const sig = crypto.createHmac('sha256', getAdminToken()).update(payload).digest('base64url');
+  return `${payload}.${sig}`;
+}
+
+function verifyAdminSessionCookie(req) {
+  try {
+    const raw = parseCookies(req)[SESSION_COOKIE];
+    if (!raw || !raw.includes('.')) return null;
+    const [payload, sig] = raw.split('.');
+    if (!payload || !sig) return null;
+    const expected = crypto.createHmac('sha256', getAdminToken()).update(payload).digest('base64url');
+    if (!safeEqual(sig, expected)) return null;
+    const data = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+    if (!data || !data.u || !data.exp || Date.now() > data.exp) return null;
+    return { username: String(data.u) };
+  } catch {
+    return null;
+  }
+}
+
+function getClientIp(req) {
+  const fwd = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+  return fwd || req.socket?.remoteAddress || 'unknown';
+}
+
+function isRateLimited(ip) {
+  const now = Date.now();
+  const list = (loginFailures.get(ip) || []).filter(ts => now - ts < LOGIN_WINDOW_MS);
+  loginFailures.set(ip, list);
+  return list.length >= LOGIN_MAX_FAILURES;
+}
+
+function recordLoginFailure(ip) {
+  const now = Date.now();
+  const list = (loginFailures.get(ip) || []).filter(ts => now - ts < LOGIN_WINDOW_MS);
+  list.push(now);
+  loginFailures.set(ip, list);
+}
+
+function readJsonBody(req, maxBytes = 8192) {
+  return new Promise((resolve, reject) => {
+    let size = 0;
+    const chunks = [];
+    req.on('data', chunk => {
+      size += chunk.length;
+      if (size > maxBytes) {
+        reject(new Error('Payload too large'));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on('end', () => {
+      try {
+        resolve(JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'));
+      } catch {
+        resolve({});
+      }
+    });
+    req.on('error', reject);
+  });
+}
+
+function isHttpsRequest(req) {
+  return req.socket?.encrypted || String(req.headers['x-forwarded-proto'] || '').toLowerCase().includes('https');
+}
+
+/** True when the caller presented the admin bearer token OR a valid signed HttpOnly admin session cookie. */
 function hasAdminToken(req, url = null, pathname = '') {
   const auth = String(req.headers?.['authorization'] || '').trim();
   if (auth.toLowerCase().startsWith('bearer ')) {
     const token = auth.slice(7).trim();
-    if (token) return safeEqual(token, getAdminToken());
+    if (token && safeEqual(token, getAdminToken())) return true;
   }
-  // NOTE: the stream token is deliberately NOT accepted from a query parameter. A
-  // credential in the URL ends up in access logs, browser history and Referer headers.
-  // The dashboards now open the stream with fetch() so the token travels in the
-  // Authorization header only.
-  return false;
+  return Boolean(verifyAdminSessionCookie(req));
 }
 
 /**
@@ -108,6 +239,84 @@ export class AdminServer {
       if (pathname === '/health') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ status: 'UP', service: 'merchant-admin' }));
+        return;
+      }
+
+      // Encrypted Password Session Auth: /api/auth/me, /api/auth/login, /api/auth/logout, /api/auth/change-password
+      if (pathname === '/api/auth/me' && req.method === 'GET') {
+        const session = verifyAdminSessionCookie(req);
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...BASE_SECURITY_HEADERS });
+        res.end(JSON.stringify(session ? { authenticated: true, username: session.username } : { authenticated: false }));
+        return;
+      }
+
+      if (pathname === '/api/auth/login' && req.method === 'POST') {
+        const ip = getClientIp(req);
+        if (isRateLimited(ip)) {
+          res.writeHead(429, { 'Content-Type': 'application/json', 'Retry-After': '900', ...BASE_SECURITY_HEADERS });
+          res.end(JSON.stringify({ error: 'Too many failed attempts. Please wait 15 minutes.' }));
+          return;
+        }
+        const body = await readJsonBody(req).catch(() => ({}));
+        const username = String(body.username || '').trim().toLowerCase();
+        const password = String(body.password || '');
+        const creds = loadAdminCredentials();
+        const userOk = safeEqual(username, creds.username);
+        const passOk = verifyAdminPassword(password, creds.passwordHash);
+        if (!userOk || !passOk) {
+          recordLoginFailure(ip);
+          res.writeHead(401, { 'Content-Type': 'application/json', ...BASE_SECURITY_HEADERS });
+          res.end(JSON.stringify({ error: 'Invalid username or password.' }));
+          return;
+        }
+        loginFailures.delete(ip);
+        const sessionVal = createAdminSessionToken(creds.username);
+        const secureFlag = isHttpsRequest(req) ? '; Secure' : '';
+        res.writeHead(200, {
+          'Content-Type': 'application/json',
+          'Cache-Control': 'no-store',
+          'Set-Cookie': `${SESSION_COOKIE}=${encodeURIComponent(sessionVal)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}${secureFlag}`,
+          ...BASE_SECURITY_HEADERS
+        });
+        res.end(JSON.stringify({ ok: true, username: creds.username }));
+        return;
+      }
+
+      if (pathname === '/api/auth/logout' && req.method === 'POST') {
+        const secureFlag = isHttpsRequest(req) ? '; Secure' : '';
+        res.writeHead(200, {
+          'Content-Type': 'application/json',
+          'Set-Cookie': `${SESSION_COOKIE}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0${secureFlag}`,
+          ...BASE_SECURITY_HEADERS
+        });
+        res.end(JSON.stringify({ ok: true }));
+        return;
+      }
+
+      if (pathname === '/api/auth/change-password' && req.method === 'POST') {
+        const session = verifyAdminSessionCookie(req);
+        if (!session) {
+          res.writeHead(401, { 'Content-Type': 'application/json', ...BASE_SECURITY_HEADERS });
+          res.end(JSON.stringify({ error: 'Sign in required' }));
+          return;
+        }
+        const body = await readJsonBody(req).catch(() => ({}));
+        const currentPassword = String(body.currentPassword || '');
+        const newPassword = String(body.newPassword || '');
+        if (newPassword.length < 8 || newPassword.length > 128) {
+          res.writeHead(400, { 'Content-Type': 'application/json', ...BASE_SECURITY_HEADERS });
+          res.end(JSON.stringify({ error: 'New password must be 8-128 characters.' }));
+          return;
+        }
+        const creds = loadAdminCredentials();
+        if (!verifyAdminPassword(currentPassword, creds.passwordHash)) {
+          res.writeHead(401, { 'Content-Type': 'application/json', ...BASE_SECURITY_HEADERS });
+          res.end(JSON.stringify({ error: 'Current password is incorrect.' }));
+          return;
+        }
+        saveAdminCredentials(creds.username, hashAdminPassword(newPassword));
+        res.writeHead(200, { 'Content-Type': 'application/json', ...BASE_SECURITY_HEADERS });
+        res.end(JSON.stringify({ ok: true }));
         return;
       }
 
@@ -203,19 +412,25 @@ export class AdminServer {
       if (pathname.startsWith('/api/')) {
         const targetUrl = new URL(req.url, this.apiBaseUrl);
         const requestClient = targetUrl.protocol === 'https:' ? https : http;
-        const defaultMerchant = this.merchantRepo.getDefault ? this.merchantRepo.getDefault() : (this.merchantRepo.findById('00000000-0000-0000-0000-000000000001') || this.merchantRepo.findAll()[0]);
+        const dappersfitMerchant = this.merchantRepo.findById('d99d66ee-1530-4c38-9872-69ecec0102a7');
+        const defaultMerchant = dappersfitMerchant || (this.merchantRepo.getDefault ? this.merchantRepo.getDefault() : (this.merchantRepo.findById('00000000-0000-0000-0000-000000000001') || this.merchantRepo.findAll()[0]));
         const defaultMerchantId = defaultMerchant?.id || '00000000-0000-0000-0000-000000000001';
+        const forwardHeaders = {
+          ...sanitizedForwardHeaders(req, targetUrl.host),
+          'x-merchant-id': req.headers['x-merchant-id'] || defaultMerchantId,
+          'x-forwarded-host': req.headers.host || '',
+          'x-forwarded-proto': req.headers['x-forwarded-proto'] || 'http'
+        };
+        // Inject internal admin bearer token server-side when browser holds a valid encrypted HttpOnly session
+        if (!forwardHeaders.authorization && !forwardHeaders.Authorization && verifyAdminSessionCookie(req)) {
+          forwardHeaders.Authorization = `Bearer ${getAdminToken()}`;
+        }
         const proxyReq = requestClient.request({
           hostname: targetUrl.hostname,
           port: targetUrl.port || undefined,
           path: `${targetUrl.pathname}${targetUrl.search}`,
           method: req.method,
-          headers: {
-            ...sanitizedForwardHeaders(req, targetUrl.host),
-            'x-merchant-id': req.headers['x-merchant-id'] || defaultMerchantId,
-            'x-forwarded-host': req.headers.host || '',
-            'x-forwarded-proto': req.headers['x-forwarded-proto'] || 'http'
-          }
+          headers: forwardHeaders
         }, (proxyRes) => {
           res.writeHead(proxyRes.statusCode, proxyRes.headers);
           proxyRes.pipe(res);
