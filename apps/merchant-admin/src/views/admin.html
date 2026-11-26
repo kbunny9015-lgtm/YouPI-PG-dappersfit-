@@ -4106,8 +4106,12 @@
           if (!ok) {
             await prompt();
             if (typeof connectAdminEventsSse === 'function') connectAdminEventsSse();
-            if (typeof connectServicesLogsSse === 'function') connectServicesLogsSse();
+            if (userRole !== 'manager' && typeof connectServicesLogsSse === 'function') connectServicesLogsSse();
           }
+        }
+        // In Manager Mode, silently short-circuit admin-only background polls so they never trigger errors
+        if (userRole === 'manager' && (/\/api\/services/.test(url) || /\/api\/admin\/tickets/.test(url) || /\/api\/logs\/stream/.test(url))) {
+          return new Response(JSON.stringify({ error: 'Manager read-only' }), { status: 403, headers: { 'Content-Type': 'application/json' } });
         }
         const opts = Object.assign({ credentials: 'same-origin' }, init);
         let res = await nativeFetch(input, opts);
@@ -4116,7 +4120,7 @@
           await prompt('Your session expired. Please sign in again.');
           res = await nativeFetch(input, opts);
           if (res.ok && typeof connectAdminEventsSse === 'function') connectAdminEventsSse();
-          if (res.ok && typeof connectServicesLogsSse === 'function') connectServicesLogsSse();
+          if (res.ok && userRole !== 'manager' && typeof connectServicesLogsSse === 'function') connectServicesLogsSse();
         }
         return res;
       }

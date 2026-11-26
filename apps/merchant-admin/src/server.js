@@ -360,8 +360,9 @@ export class AdminServer {
       // Admin Tickets API: GET /api/admin/tickets
       if (pathname === '/api/admin/tickets') {
         if (!hasAdminToken(req)) {
-          res.writeHead(401, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'Unauthorized', code: 'AUTH_REQUIRED' }));
+          const isManager = verifyAdminSessionCookie(req)?.role === 'manager';
+          res.writeHead(isManager ? 403 : 401, { 'Content-Type': 'application/json', ...BASE_SECURITY_HEADERS });
+          res.end(JSON.stringify({ error: isManager ? 'Forbidden: Manager Mode is read-only' : 'Unauthorized', code: isManager ? 'FORBIDDEN' : 'AUTH_REQUIRED' }));
           return;
         }
         const merchants = this.merchantRepo.findAll();
@@ -382,8 +383,9 @@ export class AdminServer {
       // stdout/stderr on the internet-facing admin host, so the admin token is required.
       if (pathname.startsWith('/api/services') || pathname === '/api/logs/stream') {
         if (!hasAdminToken(req, url, pathname)) {
-          res.writeHead(401, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'Unauthorized', code: 'AUTH_REQUIRED' }));
+          const isManager = verifyAdminSessionCookie(req)?.role === 'manager';
+          res.writeHead(isManager ? 403 : 401, { 'Content-Type': 'application/json', ...BASE_SECURITY_HEADERS });
+          res.end(JSON.stringify({ error: isManager ? 'Forbidden: Manager Mode is read-only' : 'Unauthorized', code: isManager ? 'FORBIDDEN' : 'AUTH_REQUIRED' }));
           return;
         }
         const controlCenterUrl = process.env.CONTROL_CENTER_URL || `http://127.0.0.1:${process.env.CONTROL_CENTER_PORT || 8090}`;

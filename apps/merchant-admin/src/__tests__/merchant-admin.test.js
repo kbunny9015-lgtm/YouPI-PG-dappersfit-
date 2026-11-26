@@ -108,9 +108,11 @@ describe('Merchant Admin Integration Tests', () => {
     assert.equal(mgrLogin.status, 200);
     assert.equal(JSON.parse(mgrLogin.text).role, 'manager');
     const mgrCookie = ((mgrLogin.headers['set-cookie'] || [])[0] || '').split(';')[0];
-    // Manager must NOT access admin tickets or POST settings
+    // Manager must NOT access admin tickets or settings (403 Forbidden, NOT 401 so login modal doesn't re-trigger)
     const mgrTickets = await get('/api/admin/tickets', { Cookie: mgrCookie });
-    assert.equal(mgrTickets.status, 401);
+    assert.equal(mgrTickets.status, 403);
+    const mgrServices = await get('/api/services', { Cookie: mgrCookie });
+    assert.equal(mgrServices.status, 403);
     const mgrSettings = await get('/api/v1/admin/merchant-settings', { Cookie: mgrCookie });
     assert.equal(mgrSettings.status, 403);
   });
