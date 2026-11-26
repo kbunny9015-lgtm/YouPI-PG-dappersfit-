@@ -46,6 +46,7 @@ export function verifyAdminPassword(password, storedHash) {
 }
 
 let cachedFallbackHash = null;
+let cachedManagerHash = null;
 function loadAdminCredentials() {
   const envUser = (process.env.ADMIN_USERNAME || 'dappersfit').trim().toLowerCase();
   if (process.env.ADMIN_PASSWORD_HASH && process.env.ADMIN_PASSWORD_HASH.includes(':')) {
@@ -63,6 +64,30 @@ function loadAdminCredentials() {
     cachedFallbackHash = hashAdminPassword(process.env.ADMIN_PASSWORD || 'Dappersfit@2026!');
   }
   return { username: envUser, passwordHash: cachedFallbackHash };
+}
+
+function loadManagerCredentials() {
+  const managerUser = (process.env.MANAGER_USERNAME || 'dappersfit@gmail.com').trim().toLowerCase();
+  if (process.env.MANAGER_PASSWORD_HASH && process.env.MANAGER_PASSWORD_HASH.includes(':')) {
+    return { username: managerUser, passwordHash: process.env.MANAGER_PASSWORD_HASH.trim() };
+  }
+  if (!cachedManagerHash) {
+    cachedManagerHash = hashAdminPassword(process.env.MANAGER_PASSWORD || 'Jail@1974');
+  }
+  return { username: managerUser, passwordHash: cachedManagerHash };
+}
+
+const MANAGER_ALLOWED_GET_PATHS = new Set([
+  '/api/v1/admin/payments',
+  '/api/v1/admin/queue',
+  '/api/v1/admin/stream',
+  '/api/v1/admin/counter-pending',
+  '/api/v1/admin/cod-orders',
+  '/api/v1/admin/merchants'
+]);
+
+function isManagerAllowedApiRequest(method, pathname) {
+  return String(method || '').toUpperCase() === 'GET' && MANAGER_ALLOWED_GET_PATHS.has(pathname);
 }
 
 function saveAdminCredentials(username, passwordHash) {
@@ -83,8 +108,8 @@ function parseCookies(req) {
   return out;
 }
 
-function createAdminSessionToken(username) {
-  const payload = Buffer.from(JSON.stringify({ u: username, exp: Date.now() + SESSION_TTL_MS })).toString('base64url');
+function createAdminSessionToken(username, role = 'admin') {
+  const payload = Buffer.from(JSON.stringify({ u: username, role, exp: Date.now() + SESSION_TTL_MS })).toString('base64url');
   const sig = crypto.createHmac('sha256', getAdminToken()).update(payload).digest('base64url');
   return `${payload}.${sig}`;
 }
@@ -99,7 +124,8 @@ function verifyAdminSessionCookie(req) {
     if (!safeEqual(sig, expected)) return null;
     const data = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
     if (!data || !data.u || !data.exp || Date.now() > data.exp) return null;
-    return { username: String(data.u) };
+    const role = data.role === 'manager' ? 'manager' : 'admin';
+    return { username: String(data.u), role };
   } catch {
     return null;
   }
@@ -152,14 +178,15 @@ function isHttpsRequest(req) {
   return req.socket?.encrypted || String(req.headers['x-forwarded-proto'] || '').toLowerCase().includes('https');
 }
 
-/** True when the caller presented the admin bearer token OR a valid signed HttpOnly admin session cookie. */
+/** True when the caller presented the admin bearer token OR a valid full-admin HttpOnly session cookie. */
 function hasAdminToken(req, url = null, pathname = '') {
   const auth = String(req.headers?.['authorization'] || '').trim();
   if (auth.toLowerCase().startsWith('bearer ')) {
     const token = auth.slice(7).trim();
     if (token && safeEqual(token, getAdminToken())) return true;
   }
-  return Boolean(verifyAdminSessionCookie(req));
+  const session = verifyAdminSessionCookie(req);
+  return Boolean(session && session.role === 'admin');
 }
 
 /**
@@ -246,7 +273,7 @@ export class AdminServer {
       if (pathname === '/api/auth/me' && req.method === 'GET') {
         const session = verifyAdminSessionCookie(req);
         res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...BASE_SECURITY_HEADERS });
-        res.end(JSON.stringify(session ? { authenticated: true, username: session.username } : { authenticated: false }));
+        res.end(JSON.stringify(session ? { authenticated: true, username: session.username, role: session.role } : { authenticated: false }));
         return;
       }
 
@@ -260,17 +287,27 @@ export class AdminServer {
         const body = await readJsonBody(req).catch(() => ({}));
         const username = String(body.username || '').trim().toLowerCase();
         const password = String(body.password || '');
-        const creds = loadAdminCredentials();
-        const userOk = safeEqual(username, creds.username);
-        const passOk = verifyAdminPassword(password, creds.passwordHash);
-        if (!userOk || !passOk) {
+        const adminCreds = loadAdminCredentials();
+        const managerCreds = loadManagerCredentials();
+
+        let matchedRole = null;
+        let matchedUser = null;
+        if (safeEqual(username, adminCreds.username) && verifyAdminPassword(password, adminCreds.passwordHash)) {
+          matchedRole = 'admin';
+          matchedUser = adminCreds.username;
+        } else if (safeEqual(username, managerCreds.username) && verifyAdminPassword(password, managerCreds.passwordHash)) {
+          matchedRole = 'manager';
+          matchedUser = managerCreds.username;
+        }
+
+        if (!matchedRole) {
           recordLoginFailure(ip);
           res.writeHead(401, { 'Content-Type': 'application/json', ...BASE_SECURITY_HEADERS });
           res.end(JSON.stringify({ error: 'Invalid username or password.' }));
           return;
         }
         loginFailures.delete(ip);
-        const sessionVal = createAdminSessionToken(creds.username);
+        const sessionVal = createAdminSessionToken(matchedUser, matchedRole);
         const secureFlag = isHttpsRequest(req) ? '; Secure' : '';
         res.writeHead(200, {
           'Content-Type': 'application/json',
@@ -278,7 +315,7 @@ export class AdminServer {
           'Set-Cookie': `${SESSION_COOKIE}=${encodeURIComponent(sessionVal)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}${secureFlag}`,
           ...BASE_SECURITY_HEADERS
         });
-        res.end(JSON.stringify({ ok: true, username: creds.username }));
+        res.end(JSON.stringify({ ok: true, username: matchedUser, role: matchedRole }));
         return;
       }
 
@@ -295,9 +332,9 @@ export class AdminServer {
 
       if (pathname === '/api/auth/change-password' && req.method === 'POST') {
         const session = verifyAdminSessionCookie(req);
-        if (!session) {
-          res.writeHead(401, { 'Content-Type': 'application/json', ...BASE_SECURITY_HEADERS });
-          res.end(JSON.stringify({ error: 'Sign in required' }));
+        if (!session || session.role !== 'admin') {
+          res.writeHead(session ? 403 : 401, { 'Content-Type': 'application/json', ...BASE_SECURITY_HEADERS });
+          res.end(JSON.stringify({ error: session ? 'Admin role required to change password.' : 'Sign in required' }));
           return;
         }
         const body = await readJsonBody(req).catch(() => ({}));
@@ -410,6 +447,13 @@ export class AdminServer {
 
       // Transparent API Proxy: /api/* -> Payment Core REST API
       if (pathname.startsWith('/api/')) {
+        const session = verifyAdminSessionCookie(req);
+        // Enforce strict read-only RBAC for Manager Mode on every /api/* call
+        if (session && session.role === 'manager' && !isManagerAllowedApiRequest(req.method, pathname)) {
+          res.writeHead(403, { 'Content-Type': 'application/json', ...BASE_SECURITY_HEADERS });
+          res.end(JSON.stringify({ error: 'Forbidden: Manager Mode is restricted to read-only live monitor & sales.' }));
+          return;
+        }
         const targetUrl = new URL(req.url, this.apiBaseUrl);
         const requestClient = targetUrl.protocol === 'https:' ? https : http;
         const dappersfitMerchant = this.merchantRepo.findById('d99d66ee-1530-4c38-9872-69ecec0102a7');
@@ -417,12 +461,12 @@ export class AdminServer {
         const defaultMerchantId = defaultMerchant?.id || '00000000-0000-0000-0000-000000000001';
         const forwardHeaders = {
           ...sanitizedForwardHeaders(req, targetUrl.host),
-          'x-merchant-id': req.headers['x-merchant-id'] || defaultMerchantId,
+          'x-merchant-id': session?.role === 'manager' ? defaultMerchantId : (req.headers['x-merchant-id'] || defaultMerchantId),
           'x-forwarded-host': req.headers.host || '',
           'x-forwarded-proto': req.headers['x-forwarded-proto'] || 'http'
         };
         // Inject internal admin bearer token server-side when browser holds a valid encrypted HttpOnly session
-        if (!forwardHeaders.authorization && !forwardHeaders.Authorization && verifyAdminSessionCookie(req)) {
+        if (!forwardHeaders.authorization && !forwardHeaders.Authorization && session) {
           forwardHeaders.Authorization = `Bearer ${getAdminToken()}`;
         }
         const proxyReq = requestClient.request({

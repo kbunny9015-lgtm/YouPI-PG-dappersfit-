@@ -1131,27 +1131,112 @@
       padding: 8px 12px;
     }
 
+    /* Manager Mode (read-only live monitor & sales only) */
+    body.manager-readonly #mainNavStoreSettings,
+    body.manager-readonly #mainNavDeveloperHub,
+    body.manager-readonly #mainNavSecurity,
+    body.manager-readonly #headerStoreBadge,
+    body.manager-readonly #merchantSwitcherBox,
+    body.manager-readonly #accountVpaDisplay,
+    body.manager-readonly #headerEnvBox,
+    body.manager-readonly #btnChangePassword,
+    body.manager-readonly #sectionStoreSettings,
+    body.manager-readonly #sectionDeveloperHub,
+    body.manager-readonly #sectionSecurity,
+    body.manager-readonly .manager-hide {
+      display: none !important;
+    }
+
+    #managerRoleBadge {
+      display: none;
+    }
+
+    body.manager-readonly #managerRoleBadge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      background: #eff6ff;
+      color: #1d4ed8;
+      border: 1px solid #bfdbfe;
+      padding: 0.25rem 0.65rem;
+      border-radius: 9999px;
+      font-size: 0.72rem;
+      font-weight: 700;
+    }
+
     @media (max-width: 767px) {
+      html,
+      body {
+        max-width: 100vw;
+        overflow-x: clip;
+      }
 
       header,
       .main-nav-bar,
       .sub-nav-bar {
-        padding-left: 1rem;
-        padding-right: 1rem;
+        padding-left: 0.85rem;
+        padding-right: 0.85rem;
       }
 
       header {
         position: static;
-        padding-top: 0.6rem;
-        padding-bottom: 0.6rem;
+        flex-wrap: wrap;
+        gap: 0.6rem;
+        padding-top: 0.7rem;
+        padding-bottom: 0.7rem;
       }
 
-      .main-nav-bar {
-        top: 0;
+      .header-quick-stats {
+        width: 100%;
+        flex-wrap: wrap;
+        gap: 0.45rem;
+        justify-content: flex-start;
+      }
+
+      .main-nav-bar,
+      .sub-nav-bar {
+        position: static;
+        display: flex;
+        flex-wrap: nowrap;
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+        gap: 0.4rem;
+        scrollbar-width: none;
+      }
+
+      .main-nav-bar::-webkit-scrollbar,
+      .sub-nav-bar::-webkit-scrollbar {
+        display: none;
+      }
+
+      .main-nav-btn,
+      .sub-nav-btn {
+        white-space: nowrap;
+        flex-shrink: 0;
+        font-size: 0.78rem;
+        padding: 0.55rem 0.8rem;
       }
 
       main {
+        padding: 0.85rem;
+        max-width: 100vw;
+        overflow-x: clip;
+      }
+
+      .kpi-row,
+      .grid-2,
+      .grid-3,
+      .slot-grid {
+        grid-template-columns: 1fr !important;
+      }
+
+      .card {
         padding: 1rem;
+        overflow-x: auto;
+      }
+
+      table {
+        font-size: 0.78rem;
       }
 
       .kpi-box {
@@ -1217,7 +1302,7 @@
       </div>
 
       <!-- Merchant Account Switcher -->
-      <div style="display:flex; align-items:center; gap:0.35rem; background:var(--bg-card); padding:0.25rem 0.6rem; border-radius:9999px; border:1px solid var(--border);">
+      <div id="merchantSwitcherBox" style="display:flex; align-items:center; gap:0.35rem; background:var(--bg-card); padding:0.25rem 0.6rem; border-radius:9999px; border:1px solid var(--border);">
         <span style="font-size:0.75rem;">🏪</span>
         <select id="headerMerchantSelector" onchange="onMerchantSwitch(this.value)" style="font-size:0.75rem; font-weight:700; background:transparent; border:none; color:var(--text-main); cursor:pointer; outline:none; max-width:150px;">
           <option value="d99d66ee-1530-4c38-9872-69ecec0102a7" selected>Dappersfit (d99d66ee...)</option>
@@ -1225,9 +1310,12 @@
         <button type="button" class="btn btn-secondary" onclick="openNewMerchantModal()" style="padding:0.15rem 0.45rem; font-size:0.7rem; border-radius:9999px;" title="Create/Onboard New Merchant">+ New</button>
       </div>
 
+      <!-- Manager Mode Read-Only Badge -->
+      <span id="managerRoleBadge">👁️ Manager Mode (Live Monitor)</span>
+
       <!-- Security Controls: Change Password & Sign Out -->
       <div style="display:flex; align-items:center; gap:0.35rem;">
-        <button type="button" class="btn btn-secondary" onclick="openChangePasswordModal()" style="padding:0.25rem 0.6rem; font-size:0.72rem; border-radius:9999px;" title="Change encrypted admin password">🔑 Password</button>
+        <button id="btnChangePassword" type="button" class="btn btn-secondary" onclick="openChangePasswordModal()" style="padding:0.25rem 0.6rem; font-size:0.72rem; border-radius:9999px;" title="Change encrypted admin password">🔑 Password</button>
         <button type="button" class="btn btn-secondary" onclick="window.__youpiAdminAuth && window.__youpiAdminAuth.logout()" style="padding:0.25rem 0.6rem; font-size:0.72rem; border-radius:9999px; color:#dc2626;" title="Sign out of admin session">Sign Out</button>
       </div>
 
@@ -1238,7 +1326,7 @@
       </span>
 
       <!-- Environment Mode -->
-      <div
+      <div id="headerEnvBox"
         style="display:flex; align-items:center; gap:0.4rem; background:var(--bg-card); padding:0.3rem 0.75rem; border-radius:9999px; border:1px solid var(--border); cursor:pointer;"
         onclick="switchSection('developerHub', 'subViewDevCloudflare')">
         <span style="font-size:0.72rem; color:var(--text-muted); font-weight:700;">ENV:</span>
@@ -3896,8 +3984,17 @@
     window.__youpiAdminAuth = (function () {
       const nativeFetch = window.fetch.bind(window);
       let isAuthed = false;
+      let userRole = 'admin';
       let checkedSession = false;
       let pending = null;
+
+      function applyRoleUI(role) {
+        userRole = role === 'manager' ? 'manager' : 'admin';
+        document.body.classList.toggle('manager-readonly', userRole === 'manager');
+        if (userRole === 'manager' && typeof switchSection === 'function') {
+          switchSection('operations', 'subViewOpsLive');
+        }
+      }
 
       function isProtected(url) {
         return (/\/api\/v1\/admin\//.test(url) || /\/api\/services/.test(url) || /\/api\/admin\/tickets/.test(url)) && !/\/admin\/sms-gateway\/download-apk/.test(url);
@@ -3909,6 +4006,7 @@
           const r = await nativeFetch('/api/auth/me', { credentials: 'same-origin' });
           const d = await r.json().catch(() => ({}));
           isAuthed = Boolean(d && d.authenticated);
+          if (isAuthed) applyRoleUI(d.role);
           checkedSession = true;
           return isAuthed;
         } catch {
@@ -3940,7 +4038,7 @@
           const userInput = document.createElement('input');
           userInput.type = 'text';
           userInput.autocomplete = 'username';
-          userInput.value = 'dappersfit';
+          userInput.placeholder = 'Admin or Manager email';
           userInput.required = true;
           userInput.style.cssText = 'width:100%;box-sizing:border-box;padding:10px 12px;border:1px solid #cbd5e1;border-radius:10px;margin-bottom:12px;font-size:14px;color:#0f172a;background:#f8fafc';
           const passLabel = document.createElement('label');
@@ -3985,6 +4083,7 @@
               }
               isAuthed = true;
               checkedSession = true;
+              applyRoleUI(d.role);
               overlay.remove();
               pending = null;
               resolve();
@@ -4025,6 +4124,7 @@
       window.fetch = authedFetch;
       return {
         token: () => '',
+        role: () => userRole,
         ensure: async () => ((await checkSession()) ? undefined : prompt()),
         logout: async () => {
           await nativeFetch('/api/auth/logout', { method: 'POST', credentials: 'same-origin' });
@@ -4129,6 +4229,12 @@
 
     // --- NAVIGATION CONTROLLER: 3 HIGH-LEVEL SECTIONS ---
     function switchSection(sectionId, targetSubTab = null) {
+      if (window.__youpiAdminAuth && window.__youpiAdminAuth.role && window.__youpiAdminAuth.role() === 'manager') {
+        sectionId = 'operations';
+        if (targetSubTab && targetSubTab !== 'subViewOpsLive' && targetSubTab !== 'subViewOpsLedger') {
+          targetSubTab = 'subViewOpsLive';
+        }
+      }
       activeSection = sectionId;
 
       // Sync URL hash without jumping

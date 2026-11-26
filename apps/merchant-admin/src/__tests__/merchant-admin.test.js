@@ -89,6 +89,30 @@ describe('Merchant Admin Integration Tests', () => {
     const cookiePair = setCookie.split(';')[0];
     const authedTickets = await get('/api/admin/tickets', { Cookie: cookiePair });
     assert.equal(authedTickets.status, 200);
+
+    // Verify Manager Mode (dappersfit@gmail.com / Jail@1974) gets role='manager' and is strictly blocked (403) from admin/write endpoints
+    const mgrLogin = await new Promise((resolve, reject) => {
+      const body = JSON.stringify({ username: 'dappersfit@gmail.com', password: process.env.MANAGER_PASSWORD || 'Jail@1974' });
+      const req = http.request(`${baseUrl}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) }
+      }, r => {
+        let data = '';
+        r.on('data', c => { data += c; });
+        r.on('end', () => resolve({ status: r.statusCode, headers: r.headers, text: data }));
+      });
+      req.on('error', reject);
+      req.write(body);
+      req.end();
+    });
+    assert.equal(mgrLogin.status, 200);
+    assert.equal(JSON.parse(mgrLogin.text).role, 'manager');
+    const mgrCookie = ((mgrLogin.headers['set-cookie'] || [])[0] || '').split(';')[0];
+    // Manager must NOT access admin tickets or POST settings
+    const mgrTickets = await get('/api/admin/tickets', { Cookie: mgrCookie });
+    assert.equal(mgrTickets.status, 401);
+    const mgrSettings = await get('/api/v1/admin/merchant-settings', { Cookie: mgrCookie });
+    assert.equal(mgrSettings.status, 403);
   });
 
   test('Control Center supervisor proxy routes (/api/services* and /api/logs/stream) require the admin token', async () => {
