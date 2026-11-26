@@ -392,9 +392,37 @@ export function registerPaymentRoutes(server, ctx) {
     const shouldActivateNow = isCounterPayment || isExplicitTestAutoActivate || Boolean(customerId);
     const initialStatus = isCounterPayment ? PaymentStatus.ACTIVE : PaymentStatus.INITIATED;
 
+    // Unique-Paise Parallel Payments: if another customer already has an ACTIVE/PROCESSING
+    // session for the exact same amount on this receiving account, add a tiny +0.01..+0.99 paise
+    // offset so multiple customers can pay simultaneously with 100% unambiguous SMS attribution.
+    let uniquePaiseOffset = 0;
+    const enableParallelUniquePaise = !isCounterPayment && !isExplicitTestAutoActivate && Boolean(receivingAccountId) && Boolean(customerId) && Boolean(ctx.db);
+    if (enableParallelUniquePaise) {
+      try {
+        const busyRows = ctx.db.query(`
+          SELECT amount_paise FROM payment_sessions
+          WHERE receiving_account_id = ? AND status IN ('ACTIVE', 'PROCESSING')
+        `, [receivingAccountId]);
+        const busyAmounts = new Set(busyRows.map(r => BigInt(r.amount_paise)));
+        if (busyAmounts.has(amountPaise)) {
+          for (let offset = 1; offset <= 99; offset++) {
+            const candidate = amountPaise + BigInt(offset);
+            if (!busyAmounts.has(candidate)) {
+              amountPaise = candidate;
+              uniquePaiseOffset = offset;
+              break;
+            }
+          }
+        }
+      } catch (offsetErr) {
+        console.warn('[Payments] Unique-paise offset check skipped:', offsetErr?.message);
+      }
+    }
+
     const sessionMetadata = {
       ...(body.metadata || {}),
-      ...(receivingAccountSnapshot ? { receivingAccountSnapshot } : {})
+      ...(receivingAccountSnapshot ? { receivingAccountSnapshot } : {}),
+      ...(uniquePaiseOffset > 0 ? { uniquePaiseOffset } : {})
     };
 
     if (deviceId && customerId && ctx.deviceRepo) {
@@ -417,11 +445,31 @@ export function registerPaymentRoutes(server, ctx) {
       metadata: sessionMetadata
     });
 
-    // Enqueue or Activate slot via QueueEngine ONLY when counter payment or explicitly requested by automated test runner
+    // Enqueue or Activate slot via QueueEngine
     let queueResult = { status: initialStatus, queuePosition: 0, expiresAt: null };
     if (!isCounterPayment && receivingAccountId && shouldActivateNow) {
       const activeDurationMs = ctx.timingEngine ? ctx.timingEngine.activeDurationMs : 300000;
       queueResult = ctx.queueEngine.enqueueOrActivate(session.id, receivingAccountId, activeDurationMs);
+
+      // Parallel Unique-Paise Activation: when another buyer already holds the slot with a
+      // DIFFERENT amount_paise, activate this session immediately in parallel (zero queue wait!)
+      if (enableParallelUniquePaise && queueResult.status === PaymentStatus.QUEUED) {
+        const sameAmountConflict = ctx.db.queryOne(`
+          SELECT id FROM payment_sessions
+          WHERE receiving_account_id = ? AND status IN ('ACTIVE', 'PROCESSING') AND amount_paise = ? AND id != ?
+          LIMIT 1
+        `, [receivingAccountId, Number(amountPaise), session.id]);
+        if (!sameAmountConflict) {
+          const nowDate = new Date();
+          const expDate = new Date(nowDate.getTime() + activeDurationMs);
+          ctx.db.execute(`
+            UPDATE payment_sessions
+            SET status = 'ACTIVE', queue_position = 0, slot_acquired_at = ?, expires_at = ?
+            WHERE id = ?
+          `, [nowDate.toISOString(), expDate.toISOString(), session.id]);
+          queueResult = { status: PaymentStatus.ACTIVE, queuePosition: 0, expiresAt: expDate };
+        }
+      }
 
       // If activated immediately, start Timer 1 (5 minutes)
       if (queueResult.expiresAt) {

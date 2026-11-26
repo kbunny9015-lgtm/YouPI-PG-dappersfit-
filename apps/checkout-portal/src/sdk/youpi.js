@@ -748,7 +748,7 @@
             right: 0 !important;
             bottom: 0 !important;
             width: 100vw !important;
-            height: 100vh !important;
+            height: 100dvh !important;
             display: flex !important;
             align-items: flex-end !important;
             justify-content: center !important;
@@ -758,9 +758,8 @@
           .youpi-checkout-container {
             width: 100vw !important;
             max-width: 100vw !important;
-            height: 90vh !important;
-            height: 90dvh !important;
-            max-height: 94vh !important;
+            height: 92dvh !important;
+            max-height: 92dvh !important;
             border-bottom-left-radius: 0 !important;
             border-bottom-right-radius: 0 !important;
             border-top-left-radius: 20px !important;
