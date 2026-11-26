@@ -358,6 +358,29 @@ export function registerPaymentRoutes(server, ctx) {
           return;
         }
       }
+
+      // Auto-cancel this same customer's previous abandoned INITIATED/QUEUED/ACTIVE sessions so retrying checkout never queues behind itself
+      if (!isCounterPayment && ctx.db) {
+        try {
+          const prevSessions = ctx.db.query(`
+            SELECT id, receiving_account_id FROM payment_sessions
+            WHERE customer_id = ? AND merchant_id = ? AND status IN ('INITIATED', 'QUEUED', 'ACTIVE')
+          `, [customerId, merchant.id]);
+          for (const prev of prevSessions) {
+            ctx.sessionRepo.transitionToTerminal(prev.id, PaymentStatus.CANCELLED);
+            if (ctx.timingEngine && typeof ctx.timingEngine.clearTimers === 'function') {
+              ctx.timingEngine.clearTimers(prev.id);
+            }
+            ctx.db.execute(`
+              UPDATE payment_receiving_accounts
+              SET is_slot_busy = 0, current_active_session_id = NULL
+              WHERE current_active_session_id = ?
+            `, [prev.id]);
+          }
+        } catch (cleanupErr) {
+          console.warn('[Payments] Previous session cleanup skipped:', cleanupErr?.message);
+        }
+      }
     }
 
     // Invariant: Do NOT start payment session timer until customer is authenticated/logged in!
